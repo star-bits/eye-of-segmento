@@ -1,2 +1,11 @@
-models/sam_vit_b_01ec64.pth
 .DS_Store
+models/sam_vit_b_01ec64.pth
+models/sam_vit_h_4b8939.pth
+models/sam_vit_l_0b3195.pth
+classification.ipynb
+.ipynb_checkpoints/classification-checkpoint.ipynb
+models/convnext_base_1k_224_ema.pth
+models/convnext_small_1k_224_ema.pth
+models/convnext_tiny_1k_224_ema.pth
+datasets/__pycache__/
+models/__pycache__/

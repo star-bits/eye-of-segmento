@@ -7,7 +7,12 @@ import numpy as np
 from segment_anything import sam_model_registry, SamPredictor
 import onnxruntime
 import time
+import math
 from PIL import Image, ImageDraw, ImageFont
+import torch
+from torchvision import transforms as T
+from models import *
+from datasets import ImageNet
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -21,9 +26,13 @@ onnx_model_path = "./onnx/sam_onnx_b.onnx"
 onnx_model_quantized_path = "./onnx/sam_onnx_b_quantized.onnx"
 # Model setup
 sam = sam_model_registry[model_type](checkpoint=checkpoint)
-sam.to(device='mps')
+sam.to(device='mps' if torch.backends.mps.is_available() else 'cpu')
 predictor = SamPredictor(sam)
 ort_session = onnxruntime.InferenceSession(onnx_model_path)
+classification_model_name = "ConvNeXt"
+classification_model_variant = "T"
+classification_model_checkpoint = "./models/convnext_tiny_1k_224_ema.pth"
+classification_image_size = 224
 # -----------------------------------------------------------------------------
 
 def masks_generator(frame):
@@ -161,7 +170,7 @@ def darken_image(image, alpha):
 
     return darkened_image
 
-def clear_center_circle(bool_array, hud_thickness=hud_thickness):
+def clear_center(bool_array, hud_thickness=hud_thickness):
     """
     Sets a circle with a radius of (hud_thickness * 2) in the center of the input 2D boolean array to False.
 
@@ -187,12 +196,113 @@ def clear_center_circle(bool_array, hud_thickness=hud_thickness):
 
     return bool_array
 
+class ModelInference:
+    def __init__(self, model: str, variant: str, checkpoint: str, size: int) -> None:
+        """
+        Initialize the ModelInference class.
+
+        Args:
+        model (str): The model class name.
+        variant (str): The model variant name.
+        checkpoint (str): The model checkpoint file.
+        size (int): The input image size for the model.
+        """
+        self.device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+        
+        # Dataset class labels
+        self.labels = ImageNet.CLASSES
+        
+        # Initialize the model with the provided variant, checkpoint, and number of class labels
+        self.model = eval(model)(variant, checkpoint, len(self.labels), size)
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+        # Define the preprocessing pipeline
+        self.preprocess = T.Compose([
+            # Normalize pixel values to [0, 1]
+            T.Lambda(lambda x: x / 255),
+            # Resize the input image to the specified size
+            T.Resize((size, size)),
+            # Normalize with ImageNet mean and std
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            # Add an additional batch dimension
+            T.Lambda(lambda x: x.unsqueeze(0))
+        ])
+
+    def __call__(self, classification_input_tensor) -> str:
+        """
+        Perform inference on the provided input tensor.
+
+        Args:
+        classification_input_tensor (torch.Tensor): The input tensor for classification.
+
+        Returns:
+        str: The predicted class label.
+        """
+        image = classification_input_tensor
+        
+        # Preprocess the input tensor
+        image = self.preprocess(image).to(self.device)
+        
+        # Perform model inference
+        with torch.inference_mode():
+            pred = self.model(image)
+        
+        # Postprocess the output to get the class label
+        cls_name = self.labels[pred.argmax()]
+        return cls_name
+
+def apply_gray_mask(image, mask):
+    """
+    Applies a gray mask on the input image wherever the mask is False.
+
+    Args:
+    image (numpy.ndarray): The input image.
+    mask (numpy.ndarray): The binary mask to apply.
+
+    Returns:
+    numpy.ndarray: The masked image.
+    """
+    h, w = mask.shape[-2:]
+    gray_mask = np.full((h, w, 3), 128, dtype=np.uint8)
+    masked_image = np.where(mask.reshape(h, w, 1), image, gray_mask)
+    return masked_image.astype(np.uint8)
+
+def crop_image_by_mask(image, mask):
+    """
+    Crops the input image based on the bounding box defined by the True values in the mask array.
+
+    Args:
+    image (numpy.ndarray): The input image.
+    mask (numpy.ndarray): The 2D bool array.
+
+    Returns:
+    numpy.ndarray: The cropped image.
+    """
+    # Find the indices of the True values in the mask
+    true_indices = np.argwhere(mask)
+
+    # Get the top, bottom, left, and right coordinates of the bounding box
+    top = true_indices[:, 0].min()
+    bottom = true_indices[:, 0].max()
+    left = true_indices[:, 1].min()
+    right = true_indices[:, 1].max()
+
+    # Crop the image using the bounding box coordinates
+    cropped_image = image[top:bottom+1, left:right+1]
+
+    return cropped_image
+
+
+# Instance of classification model
+classification_model = ModelInference(model=classification_model_name, variant=classification_model_variant, checkpoint=classification_model_checkpoint, size=classification_image_size)
 
 # Open the default camera (0 represents the default camera, change the index for other cameras)
 cap = cv2.VideoCapture(0)
 
 while True:
     start_time = time.time()
+    print(f"mps check: {'mps' if torch.backends.mps.is_available() else 'cpu'}")
 
     # Capture the frame
     _, frame = cap.read()
@@ -205,6 +315,7 @@ while True:
     # Convert the frame to a NumPy array
     frame_np = np.array(frame_resized)
     print(f"frame_np.shape: {frame_np.shape}")
+    classification_input_np = np.copy(frame_np)
 
     # Darken the frame
     frame_np = darken_image(frame_np, alpha=0.5)
@@ -224,7 +335,7 @@ while True:
 
     # Draw the mask contour
     mask_outline = draw_contours(mask_2d, thickness=hud_thickness)
-    mask_outline = clear_center_circle(mask_outline)
+    mask_outline = clear_center(mask_outline)
     frame_np = apply_mask(frame_np, mask_outline, alpha=1)
 
     # Draw the center circle
@@ -233,11 +344,18 @@ while True:
     width = hud_thickness
     cv2.circle(frame_np, center, radius, hud_color, width)
 
-    # Classification
+    # Image classification
+    classification_input_np = apply_gray_mask(classification_input_np, mask_2d)
+    classification_input_np_cropped = crop_image_by_mask(classification_input_np, mask_2d)
+    classification_input_tensor = torch.from_numpy(classification_input_np_cropped)
+    classification_input_tensor = classification_input_tensor.permute(2, 0, 1)
+    print(f"classification_input_tensor.shape: {classification_input_tensor.shape}")
+    cls_name = classification_model(classification_input_tensor)
+    print(f"classification result: {cls_name.capitalize()}")
 
     # Calculate FPS and display it on the frame
     end_time = time.time()
-    print(end_time - start_time)
+    print(f"{end_time-start_time:.2f}")
     print("-----------------------------------------------------------------------------")
     frame_np = add_text(frame_np, text=f"FPS: {1/(end_time-start_time):.2f}", font_size=28, font_color=hud_color, position=(30, 30))
 
@@ -245,6 +363,9 @@ while True:
     frame_np = add_text(frame_np, text=f"frame_np.shape: {frame_np.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-140))
     frame_np = add_text(frame_np, text=f"mask_2d.shape: {mask_2d.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-100))
     frame_np = add_text(frame_np, text=f"mask_2d any: {np.any(mask_2d)}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-60))
+
+    line_starting_point = (int(math.sqrt(((hud_thickness*2)**2)*2)), int(math.sqrt(((hud_thickness*2)**2)*2)))
+    cv2.line(frame_np, line_starting_point, ((frame_np.shape[1]//2)+(frame_np.shape[0]//6), frame_np.shape[0]//6), hud_color, hud_thickness)
 
     # Show the modified frame
     cv2.imshow('Eye of Segmento', frame_np)
