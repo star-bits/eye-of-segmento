@@ -10,6 +10,7 @@ import time
 
 # -----------------------------------------------------------------------------
 reduce_res_factor = 1
+thickness = 5
 
 checkpoint = "./models/sam_vit_b_01ec64.pth"
 model_type = "vit_b"
@@ -61,8 +62,25 @@ def apply_mask(image, mask, alpha):
     masked_image = image * (1 - alpha * mask.reshape(h, w, 1)) + color_mask * alpha * mask.reshape(h, w, 1)
     return masked_image.astype(np.uint8)
 
-def get_outline(mask, width=3):
-    return outline_mask
+def draw_contours(input_mask, thickness):
+    # Convert the input boolean mask to uint8
+    uint8_mask = (input_mask * 255).astype(np.uint8)
+    
+    # Create a contour mask
+    contour_mask = np.zeros(uint8_mask.shape, dtype=np.uint8)
+
+    # Find contours
+    contours = cv2.findContours(uint8_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = contours[0] if len(contours) == 2 else contours[1]
+    
+    # Draw contours on the contour mask
+    for contour in contours:
+        cv2.drawContours(contour_mask, [contour], -1, 255, thickness)
+
+    # Convert the contour mask back to a boolean type
+    bool_contour_mask = contour_mask.astype(np.bool_)
+    
+    return bool_contour_mask
 
 
 # Open the default camera (0 represents the default camera, change the index for other cameras)
@@ -91,19 +109,17 @@ while True:
 
     mask_2d = np.squeeze(mask)
     print(f"mask_2d.shape: {mask_2d.shape}")
-    print(mask_2d)
-    
     merged_frame = apply_mask(frame_np, mask_2d, alpha=0.33)
 
-    # outline_mask = get_outline(mask, width=3)
-    # print(f"outline_mask any: {np.any(outline_mask)}")
+    mask_outline = draw_contours(mask_2d, thickness=thickness)
+    merged_frame = apply_mask(merged_frame, mask_outline, alpha=1)
 
-    # box
+    # classification label
 
     center = (frame_resized.shape[1]//2, frame_resized.shape[0]//2)
-    radius = 6
+    radius = thickness * 2
     teal = (217, 200, 123)
-    width = 3
+    width = thickness
     cv2.circle(merged_frame, center, radius, teal, width)
 
     end_time = time.time()
