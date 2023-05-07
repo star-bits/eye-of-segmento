@@ -152,6 +152,53 @@ def add_text(image_np, text, font_size, font_color, position):
 
     return image_text_np
 
+def add_highlighted_text(image_np, text, font_size, font_color, position, box_color, box_padding, outline_color, outline_thickness, alpha):
+    """
+    Adds text to the input image at the specified position using the specified font and draws a box with an outline around it.
+    Args:
+    image_np (numpy.ndarray): The input image.
+    text (str): The text to add.
+    font_size (int): The font size.
+    font_color (tuple): The font color.
+    position (tuple): The position to add the text.
+    box_color (tuple): The color of the box around the text.
+    box_padding (int): The padding between the text and the box.
+    outline_color (tuple): The color of the outline around the box.
+    outline_thickness (int): The thickness of the outline around the box.
+    alpha (float): The transparency level of the box fill (0 to 1).
+
+    Returns:
+    numpy.ndarray: The modified image with the added text and box with an outline.
+    """
+    # Convert the NumPy array back to a PIL image
+    image_pil = Image.fromarray(image_np)
+
+    # Define the font type, size, and color
+    font_path = hud_font
+    font = ImageFont.truetype(font_path, font_size)
+
+    # Create a drawing context
+    draw = ImageDraw.Draw(image_pil, "RGBA")
+
+    # Calculate the text size using the textbbox() function
+    text_bbox = draw.textbbox(position, text, font=font)
+
+    # Draw a rectangle with a transparent background around the text
+    draw.rectangle(
+        [text_bbox[0] - box_padding, text_bbox[1] - box_padding, text_bbox[2] + box_padding, text_bbox[3] + box_padding],
+        fill=box_color + (int(255 * alpha),),  # RGBA: Add an alpha channel to the box color for transparency
+        outline=outline_color,
+        width=outline_thickness
+    )
+
+    # Add the text to the image using the text() function with a transparent background
+    draw.text(position, text, font=font, fill=font_color, stroke_width=0)
+
+    # Convert the modified PIL image back to a NumPy array
+    image_text_np = np.array(image_pil)
+
+    return image_text_np
+
 def darken_image(image, alpha):
     """
     Darkens the input image by blending it with a black image using the specified alpha value.
@@ -295,7 +342,10 @@ def crop_image_by_mask(image, mask):
 
 
 # Instance of classification model
-classification_model = ModelInference(model=classification_model_name, variant=classification_model_variant, checkpoint=classification_model_checkpoint, size=classification_image_size)
+classification_model = ModelInference(model=classification_model_name, 
+                                      variant=classification_model_variant, 
+                                      checkpoint=classification_model_checkpoint, 
+                                      size=classification_image_size)
 
 # Open the default camera (0 represents the default camera, change the index for other cameras)
 cap = cv2.VideoCapture(0)
@@ -360,12 +410,16 @@ while True:
     frame_np = add_text(frame_np, text=f"FPS: {1/(end_time-start_time):.2f}", font_size=28, font_color=hud_color, position=(30, 30))
 
     # Display additional information on the frame
-    frame_np = add_text(frame_np, text=f"frame_np.shape: {frame_np.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-140))
-    frame_np = add_text(frame_np, text=f"mask_2d.shape: {mask_2d.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-100))
-    frame_np = add_text(frame_np, text=f"mask_2d any: {np.any(mask_2d)}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-60))
+    frame_np = add_text(frame_np, text=f"frame_np.shape: {frame_np.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-180))
+    frame_np = add_text(frame_np, text=f"mask_2d.shape: {mask_2d.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-140))
+    frame_np = add_text(frame_np, text=f"mask_2d any: {np.any(mask_2d)}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-100))
+    frame_np = add_text(frame_np, text=f"classification_input_tensor.shape: {classification_input_tensor.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-60))
 
-    line_starting_point = (int(math.sqrt(((hud_thickness*2)**2)*2)), int(math.sqrt(((hud_thickness*2)**2)*2)))
-    cv2.line(frame_np, line_starting_point, ((frame_np.shape[1]//2)+(frame_np.shape[0]//6), frame_np.shape[0]//6), hud_color, hud_thickness)
+    center_circle_point = int(math.sqrt((hud_thickness**2)*2))
+    frame_x, frame_y = frame_np.shape[1], frame_np.shape[0]
+    cv2.line(frame_np, ((frame_x//2)+center_circle_point, (frame_y//2)-center_circle_point), ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
+    cv2.line(frame_np, ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), ((frame_x//2)+(frame_y//8)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
+    frame_np = add_highlighted_text(frame_np, text=cls_name.capitalize(), font_size=32, font_color=hud_color, box_color=hud_color, box_padding=int(hud_thickness*2), outline_color=hud_color, alpha=0.33, outline_thickness=int(hud_thickness*1.5), position=((frame_x//2)+(frame_y//8)+(frame_y//8)+hud_thickness*1.5, (frame_y//2)-(frame_y//8)-hud_thickness*3))
 
     # Show the modified frame
     cv2.imshow('Eye of Segmento', frame_np)
