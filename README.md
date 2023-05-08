@@ -5,7 +5,7 @@ https://user-images.githubusercontent.com/93939472/236849036-576b8050-cd3e-481c-
 
 For demo purposes, camera input is replaced with video.
 
-## Build
+## Install
 ```shell
 git clone https://github.com/star-bits/eye-of-segmento-mac.git
 cd eye-of-segmento-mac
@@ -33,7 +33,7 @@ convnext_tiny_1k_224_ema.pth
 - [<code>sam_vit_h_4b8939.pth</code>](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)
 
 ## Run
+Ensure `hud_font` config points to the path of your font.
 ```shell
 python run.py
 ```
-Ensure `hud_font` configuration points to the path of your font, e.g., `hud_font = '/Users/user_name/Library/Fonts/SFMono-Bold.ttf'`.
