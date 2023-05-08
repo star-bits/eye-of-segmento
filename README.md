@@ -1,7 +1,9 @@
 # Eye of Segmento
 
 ## Demo
+https://user-images.githubusercontent.com/93939472/236849036-576b8050-cd3e-481c-b9a8-7cfb6dc30ba0.mp4
 
+For demo purposes, camera input is replaced with video.
 
 ## Build
 ```shell
@@ -34,3 +36,4 @@ convnext_tiny_1k_224_ema.pth
 ```shell
 python run.py
 ```
+Ensure `hud_font` configuration points to the path of your font, e.g., `hud_font = '/Users/user_name/Library/Fonts/SFMono-Bold.ttf'`.
