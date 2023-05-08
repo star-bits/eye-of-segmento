@@ -9,3 +9,4 @@ models/convnext_small_1k_224_ema.pth
 models/convnext_tiny_1k_224_ema.pth
 datasets/__pycache__/
 models/__pycache__/
+demo.mp4
