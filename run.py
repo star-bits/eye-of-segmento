@@ -24,18 +24,13 @@ checkpoint = "./models/sam_vit_b_01ec64.pth"
 model_type = "vit_b"
 onnx_model_path = "./onnx/sam_onnx_b.onnx"
 onnx_model_quantized_path = "./onnx/sam_onnx_b_quantized.onnx"
-# Model setup
-sam = sam_model_registry[model_type](checkpoint=checkpoint)
-sam.to(device='mps' if torch.backends.mps.is_available() else 'cpu')
-predictor = SamPredictor(sam)
-ort_session = onnxruntime.InferenceSession(onnx_model_path)
 classification_model_name = "ConvNeXt"
 classification_model_variant = "T"
 classification_model_checkpoint = "./models/convnext_tiny_1k_224_ema.pth"
 classification_image_size = 224
 # -----------------------------------------------------------------------------
 
-def masks_generator(frame):
+def generate_mask(frame):
     """
     Generates segmentation masks using the SAM predictor and ONNX model.
     Args:
@@ -47,7 +42,7 @@ def masks_generator(frame):
     # Get image embedding from SAM predictor
     predictor.set_image(frame)
     image_embedding = predictor.get_image_embedding().cpu().numpy()
-    # print(f"image_embedding.shape: {image_embedding.shape}")
+    print(f"image_embedding.shape: {image_embedding.shape}")
 
     # The following inputs must all be supplied to the ONNX model. All inputs are np.float32.
     input_point = np.array([[frame.shape[1]//2, frame.shape[0]//2]])
@@ -74,7 +69,7 @@ def masks_generator(frame):
 
     return masks
 
-def apply_mask(image, mask, alpha):
+def overlay_mask(image, mask, alpha):
     """
     Applies a colored mask on the input image with the given transparency.
     Args:
@@ -152,7 +147,43 @@ def add_text(image_np, text, font_size, font_color, position):
 
     return image_text_np
 
-def add_highlighted_text(image_np, text, font_size, font_color, position, box_color, box_padding, outline_color, outline_thickness, alpha):
+def calculate_bbox_coords(image_np, text, font_size, position, bbox_padding, outline_thickness):
+    """
+    Calculates the (top, bottom, left, right) coordinates of the text bbox rectangle given the input parameters.
+
+    Args:
+    image_np (numpy.ndarray): The input image.
+    text (str): The text to add.
+    font_size (int): The font size.
+    position (tuple): The position to add the text.
+    bbox_padding (int): The padding between the text and the bbox.
+    outline_thickness (int): The thickness of the outline around the bbox.
+
+    Returns:
+    tuple: The (top, bottom, left, right) coordinates of the text bbox rectangle.
+    """
+    # Convert the NumPy array back to a PIL image
+    image_pil = Image.fromarray(image_np)
+
+    # Define the font type and size
+    font_path = hud_font
+    font = ImageFont.truetype(font_path, font_size)
+
+    # Create a drawing context
+    draw = ImageDraw.Draw(image_pil)
+
+    # Calculate the text size using the textbbox() function
+    text_bbox = draw.textbbox(position, text, font=font)
+
+    # Define the rectangle coordinates
+    top = text_bbox[1] - bbox_padding
+    bottom = text_bbox[3] + bbox_padding
+    left = text_bbox[0] - bbox_padding
+    right = text_bbox[2] + bbox_padding
+
+    return (top, bottom, left, right)
+
+def add_highlighted_text(image_np, text, font_size, font_color, position, bbox_color, bbox_padding, outline_color, outline_thickness, alpha):
     """
     Adds text to the input image at the specified position using the specified font and draws a box with an outline around it.
     Args:
@@ -166,7 +197,6 @@ def add_highlighted_text(image_np, text, font_size, font_color, position, box_co
     outline_color (tuple): The color of the outline around the box.
     outline_thickness (int): The thickness of the outline around the box.
     alpha (float): The transparency level of the box fill (0 to 1).
-
     Returns:
     numpy.ndarray: The modified image with the added text and box with an outline.
     """
@@ -185,8 +215,8 @@ def add_highlighted_text(image_np, text, font_size, font_color, position, box_co
 
     # Draw a rectangle with a transparent background around the text
     draw.rectangle(
-        [text_bbox[0] - box_padding, text_bbox[1] - box_padding, text_bbox[2] + box_padding, text_bbox[3] + box_padding],
-        fill=box_color + (int(255 * alpha),),  # RGBA: Add an alpha channel to the box color for transparency
+        [text_bbox[0] - bbox_padding, text_bbox[1] - bbox_padding, text_bbox[2] + bbox_padding, text_bbox[3] + bbox_padding],
+        fill=bbox_color + (int(255 * alpha),),  # RGBA: Add an alpha channel to the box color for transparency
         outline=outline_color,
         width=outline_thickness
     )
@@ -299,7 +329,7 @@ class ModelInference:
         cls_name = self.labels[pred.argmax()]
         return cls_name
 
-def apply_gray_mask(image, mask):
+def overlay_gray_mask(image, mask):
     """
     Applies a gray mask on the input image wherever the mask is False.
 
@@ -317,7 +347,7 @@ def apply_gray_mask(image, mask):
 
 def crop_image_by_mask(image, mask):
     """
-    Crops the input image based on the bounding box defined by the True values in the mask array.
+    Crops the input image based on the bbox defined by the True values in the mask array.
 
     Args:
     image (numpy.ndarray): The input image.
@@ -329,23 +359,54 @@ def crop_image_by_mask(image, mask):
     # Find the indices of the True values in the mask
     true_indices = np.argwhere(mask)
 
-    # Get the top, bottom, left, and right coordinates of the bounding box
+    # Get the top, bottom, left, and right coordinates of the bbox
     top = true_indices[:, 0].min()
     bottom = true_indices[:, 0].max()
     left = true_indices[:, 1].min()
     right = true_indices[:, 1].max()
 
-    # Crop the image using the bounding box coordinates
+    # Crop the image using the bbox coordinates
     cropped_image = image[top:bottom+1, left:right+1]
 
     return cropped_image
 
+def clear_textbbox(mask_2d, textbbox_coords, set_value):
+    """
+    Modifies the input 2D boolean numpy array mask_2d, setting the specified boolean value for any pixels within the input text bbox.
 
-# Instance of classification model
+    Args:
+    mask_2d (numpy.ndarray): A 2D boolean numpy array representing the mask.
+    textbbox_coords (tuple): A tuple containing the (top, bottom, left, right) coordinates of the text bbox.
+    set_value (bool): The boolean value to set for the pixels within the text bbox.
+
+    Returns:
+    numpy.ndarray: The modified 2D boolean numpy array with the specified boolean value for any pixels within the input text bbox.
+    """
+    top, bottom, left, right = [int(coord) for coord in textbbox_coords]
+
+    # Check if the coordinates are within the mask boundaries
+    mask_height, mask_width = mask_2d.shape
+    top = max(0, top)
+    bottom = min(mask_height, bottom)
+    left = max(0, left)
+    right = min(mask_width, right)
+
+    # Set the values within the text bbox to the specified value
+    mask_2d[top:bottom, left:right] = set_value
+
+    return mask_2d
+
+# -----------------------------------------------------------------------------
+# Model setup
+sam = sam_model_registry[model_type](checkpoint=checkpoint)
+sam.to(device='mps' if torch.backends.mps.is_available() else 'cpu')
+predictor = SamPredictor(sam)
+ort_session = onnxruntime.InferenceSession(onnx_model_path)
 classification_model = ModelInference(model=classification_model_name, 
                                       variant=classification_model_variant, 
                                       checkpoint=classification_model_checkpoint, 
                                       size=classification_image_size)
+# -----------------------------------------------------------------------------
 
 # Open the default camera (0 represents the default camera, change the index for other cameras)
 cap = cv2.VideoCapture(0)
@@ -354,7 +415,7 @@ while True:
     start_time = time.time()
     print(f"mps check: {'mps' if torch.backends.mps.is_available() else 'cpu'}")
 
-    # Capture the frame
+    # Capture a single frame
     _, frame = cap.read()
     print(f"frame.shape: {frame.shape}")
 
@@ -362,66 +423,71 @@ while True:
     frame_resized = cv2.resize(frame, (frame.shape[1]//frame_resize_factor, frame.shape[0]//frame_resize_factor), interpolation=cv2.INTER_AREA)
     print(f"frame_resized.shape: {frame_resized.shape}")
 
-    # Convert the frame to a NumPy array
+    # Convert the resized frame to a NumPy array
     frame_np = np.array(frame_resized)
     print(f"frame_np.shape: {frame_np.shape}")
-    classification_input_np = np.copy(frame_np)
-
-    # Darken the frame
-    frame_np = darken_image(frame_np, alpha=0.5)
 
     # Generate masks
-    masks = masks_generator(frame_resized)
+    masks = generate_mask(frame_resized)
     print(f"masks.shape: {masks.shape}")
     print(f"masks.dtype: {masks.dtype}")
-    print(f"masks any: {np.any(masks)}")
+    print(f"np.any(masks): {np.any(masks)}")
 
-    # Get the first mask and apply it to the frame
+    # Extract the first mask
     mask = masks[0]
     print(f"mask.shape: {mask.shape}")
     mask_2d = np.squeeze(mask)
     print(f"mask_2d.shape: {mask_2d.shape}")
-    frame_np = apply_mask(frame_np, mask_2d, alpha=0.33)
-
-    # Draw the mask contour
-    mask_outline = draw_contours(mask_2d, thickness=hud_thickness)
-    mask_outline = clear_center(mask_outline)
-    frame_np = apply_mask(frame_np, mask_outline, alpha=1)
-
-    # Draw the center circle
-    center = (frame_np.shape[1]//2, frame_np.shape[0]//2)
-    radius = hud_thickness * 2
-    width = hud_thickness
-    cv2.circle(frame_np, center, radius, hud_color, width)
 
     # Image classification
-    classification_input_np = apply_gray_mask(classification_input_np, mask_2d)
-    classification_input_np_cropped = crop_image_by_mask(classification_input_np, mask_2d)
+    classification_input_np_overlay = overlay_gray_mask(frame_np, mask_2d)
+    classification_input_np_cropped = crop_image_by_mask(classification_input_np_overlay, mask_2d)
     classification_input_tensor = torch.from_numpy(classification_input_np_cropped)
     classification_input_tensor = classification_input_tensor.permute(2, 0, 1)
     print(f"classification_input_tensor.shape: {classification_input_tensor.shape}")
     cls_name = classification_model(classification_input_tensor)
     print(f"classification result: {cls_name.capitalize()}")
 
-    # Calculate FPS and display it on the frame
-    end_time = time.time()
-    print(f"{end_time-start_time:.2f}")
-    print("-----------------------------------------------------------------------------")
-    frame_np = add_text(frame_np, text=f"FPS: {1/(end_time-start_time):.2f}", font_size=28, font_color=hud_color, position=(30, 30))
+    # Darken the frame
+    frame_np = darken_image(frame_np, alpha=0.5)
 
-    # Display additional information on the frame
+    # Values for later
+    frame_x, frame_y = frame_np.shape[1], frame_np.shape[0]
+    center_circle_radius = int(math.sqrt((hud_thickness**2)*2))
+
+    # mask_area
+    mask_area = np.copy(mask_2d)
+    textbbox_coords = calculate_bbox_coords(frame_np, text=cls_name.capitalize(), font_size=32, bbox_padding=int(hud_thickness*2), outline_thickness=int(hud_thickness*1.5), position=((frame_x//2)+(frame_y//8)+(frame_y//8)+hud_thickness*1.5, (frame_y//2)-(frame_y//8)-hud_thickness*3))
+    mask_area = clear_textbbox(mask_area, textbbox_coords, set_value=True)
+    frame_np = overlay_mask(frame_np, mask_area, alpha=0.33)
+
+    # mask_outline
+    mask_outline = np.copy(mask_2d)
+    mask_outline = draw_contours(mask_outline, thickness=hud_thickness)
+    mask_outline = clear_textbbox(mask_outline, textbbox_coords, set_value=False)
+    mask_outline = clear_center(mask_outline)
+    frame_np = overlay_mask(frame_np, mask_outline, alpha=1)
+
+    # Draw the center circle
+    center_coords = (frame_np.shape[1]//2, frame_np.shape[0]//2)
+    circle_radius = hud_thickness * 2
+    circle_width = hud_thickness
+    cv2.circle(frame_np, center_coords, circle_radius, hud_color, circle_width)
+    # Draw the lines
+    cv2.line(frame_np, ((frame_x//2)+center_circle_radius, (frame_y//2)-center_circle_radius), ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
+    cv2.line(frame_np, ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), ((frame_x//2)+(frame_y//8)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
+    frame_np = add_highlighted_text(frame_np, text=cls_name.capitalize(), font_size=32, font_color=hud_color, bbox_color=hud_color, bbox_padding=int(hud_thickness*2), outline_color=hud_color, alpha=0, outline_thickness=int(hud_thickness*1.5), position=((frame_x//2)+(frame_y//8)+(frame_y//8)+hud_thickness*1.5, (frame_y//2)-(frame_y//8)-hud_thickness*3))
+    # Add diagnostic infos
     frame_np = add_text(frame_np, text=f"frame_np.shape: {frame_np.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-180))
     frame_np = add_text(frame_np, text=f"mask_2d.shape: {mask_2d.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-140))
-    frame_np = add_text(frame_np, text=f"mask_2d any: {np.any(mask_2d)}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-100))
+    frame_np = add_text(frame_np, text=f"np.any(mask_2d): {np.any(mask_2d)}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-100))
     frame_np = add_text(frame_np, text=f"classification_input_tensor.shape: {classification_input_tensor.shape}", font_size=28, font_color=hud_color, position=(30, frame_np.shape[0]-60))
+    # Add FPS
+    end_time = time.time()
+    frame_np = add_text(frame_np, text=f"FPS: {1/(end_time-start_time):.2f}", font_size=28, font_color=hud_color, position=(30, 30))
+    print(f"{end_time-start_time:.2f}")
+    print("-----------------------------------------------------------------------------")
 
-    center_circle_point = int(math.sqrt((hud_thickness**2)*2))
-    frame_x, frame_y = frame_np.shape[1], frame_np.shape[0]
-    cv2.line(frame_np, ((frame_x//2)+center_circle_point, (frame_y//2)-center_circle_point), ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
-    cv2.line(frame_np, ((frame_x//2)+(frame_y//8), (frame_y//2)-(frame_y//8)), ((frame_x//2)+(frame_y//8)+(frame_y//8), (frame_y//2)-(frame_y//8)), hud_color, hud_thickness)
-    frame_np = add_highlighted_text(frame_np, text=cls_name.capitalize(), font_size=32, font_color=hud_color, box_color=hud_color, box_padding=int(hud_thickness*2), outline_color=hud_color, alpha=0.33, outline_thickness=int(hud_thickness*1.5), position=((frame_x//2)+(frame_y//8)+(frame_y//8)+hud_thickness*1.5, (frame_y//2)-(frame_y//8)-hud_thickness*3))
-
-    # Show the modified frame
     cv2.imshow('Eye of Segmento', frame_np)
 
     # Press 'q' to exit the loop
