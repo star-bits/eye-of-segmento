@@ -7,8 +7,8 @@ For demo purposes, camera input is replaced with video.
 
 ## Install
 ```shell
-git clone https://github.com/star-bits/eye-of-segmento-mac.git
-cd eye-of-segmento-mac
+git clone https://github.com/star-bits/eye-of-segmento.git
+cd eye-of-segmento
 
 pip install -r requirements.txt
 pip install git+https://github.com/facebookresearch/segment-anything.git
